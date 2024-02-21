@@ -70,15 +70,16 @@ y_pad = 0.03 # 3% padding at top and bottom of autozoom plots
 y_label_width = 65
 timestamp_format = '%Y-%m-%d %H:%M:%S.%f'
 display_timezone = tzlocal() # default to local
+truncate_timestamp = True
 winx,winy,winw,winh = 300,150,800,400
 win_recreate_delta = 30
 log_plot_offset = -2.2222222e-16 # I could file a bug report, probably in PyQt, but this is more fun
 # format: mode, min-duration, pd-freq-fmt, tick-str-len
-time_splits = [('years', 2*365*24*60*60,  'YS',  4), ('months', 3*30*24*60*60, 'MS', 10), ('weeks',   3*7*24*60*60, 'W-MON', 10),
-               ('days',      3*24*60*60,   'D', 10), ('hours',        9*60*60, '3H', 16), ('hours',        3*60*60,     'H', 16),
-               ('minutes',        45*60, '15T', 16), ('minutes',        15*60, '5T', 16), ('minutes',         3*60,     'T', 16),
-               ('seconds',           45, '15S', 19), ('seconds',           15, '5S', 19), ('seconds',            3,     'S', 19),
-               ('milliseconds',       0,   'L', 23)]
+time_splits = [('years', 2*365*24*60*60,    'YS',  4), ('months', 3*30*24*60*60,   'MS', 10), ('weeks',   3*7*24*60*60, 'W-MON', 10),
+               ('days',      3*24*60*60,     'D', 10), ('hours',        9*60*60,   '3h', 16), ('hours',        3*60*60,     'h', 16),
+               ('minutes',        45*60, '15min', 16), ('minutes',        15*60, '5min', 16), ('minutes',         3*60,   'min', 16),
+               ('seconds',           45,   '15s', 19), ('seconds',           15,   '5s', 19), ('seconds',            3,     's', 19),
+               ('milliseconds',       0,    'ms', 23)]
 
 app = None
 windows = [] # no gc
@@ -129,7 +130,7 @@ class EpochAxisItem(pg.AxisItem):
                 if self.vb.datasrc is not None and not self.vb.datasrc.is_smooth_time():
                     desired_ticks -= 1 # leave more space for unevenly spaced ticks
                 desired_ticks = max(desired_ticks, 4)
-                to_midnight = freq in ('YS','MS', 'W-MON', 'D')
+                to_midnight = freq in ('YS', 'MS', 'W-MON', 'D')
                 tz = display_timezone if to_midnight else None # for shorter timeframes, timezone seems buggy
                 rng = pd.date_range(t0, t1, tz=tz, normalize=to_midnight, freq=freq)
                 steps = len(rng) if len(rng)&1==0 else len(rng)+1 # reduce jitter between e.g. 5<-->10 ticks for resolution close to limit
@@ -334,7 +335,7 @@ class PandasDataSource:
         def calc_sd(ser):
             ser = ser.iloc[:1000]
             absdiff = ser.diff().abs()
-            absdiff[absdiff<1e-30] = 1e30
+            absdiff[absdiff<1e-30] = np.float32(1e30)
             smallest_diff = absdiff.min()
             if smallest_diff > 1e29: # just 0s?
                 return 0
@@ -1177,13 +1178,14 @@ class FinPlotItem(pg.GraphicsObject):
 
     def repaint(self):
         self.dirty = True
-        self.paint(self.painter)
+        self.paint(None)
 
     def paint(self, p, *args):
         if self.datasrc.is_sparse:
             self.dirty = True
         self.update_dirty_picture(self.viewRect())
-        p.drawPicture(0, 0, self.picture)
+        if p is not None:
+            p.drawPicture(0, 0, self.picture)
 
     def update_dirty_picture(self, visibleRect):
         if self.dirty or \
@@ -2455,9 +2457,9 @@ def _adjust_renko_datasrc(bins, step, datasrc):
 
 
 def _adjust_renko_log_datasrc(bins, step, datasrc):
-    datasrc.df.loc[:,datasrc.df.colums[1]] = np.log10(datasrc.df.iloc[:,1])
+    datasrc.df.loc[:,datasrc.df.columns[1]] = np.log10(datasrc.df.iloc[:,1])
     _adjust_renko_datasrc(bins, step, datasrc)
-    datasrc.df.loc[:,datasrc.df.colums[1:5]] = 10**datasrc.df.iloc[:,1:5]
+    datasrc.df.loc[:,datasrc.df.columns[1:5]] = 10**datasrc.df.iloc[:,1:5]
 
 
 def _adjust_volume_datasrc(datasrc):
@@ -2569,7 +2571,8 @@ def _start_visual_update(item):
         y = item.datasrc.y / item.ax.vb.yscale.scalef
         if item.ax.vb.yscale.scaletype == 'log':
             y = y + log_plot_offset
-        item.setData(item.datasrc.index, y)
+        x = item.datasrc.index if item.ax.vb.x_indexed else item.datasrc.x
+        item.setData(x, y)
 
 
 def _end_visual_update(item):
@@ -2764,12 +2767,12 @@ def _pdtime2epoch(t):
         if isinstance(t.iloc[0], pd.Timestamp):
             dtype = str(t.dtype)
             if dtype.endswith('[s]'):
-                return t.view('int64') * int(1e9)
+                return t.astype('int64') * int(1e9)
             elif dtype.endswith('[ms]'):
-                return t.view('int64') * int(1e6)
+                return t.astype('int64') * int(1e6)
             elif dtype.endswith('us'):
-                return t.view('int64') * int(1e3)
-            return t.view('int64')
+                return t.astype('int64') * int(1e3)
+            return t.astype('int64')
         h = np.nanmax(t.values)
         if h < 1e10: # handle s epochs
             return (t*1e9).astype('int64')
@@ -2783,7 +2786,7 @@ def _pdtime2epoch(t):
 
 def _pdtime2index(ax, ts, any_end=False, require_time=False):
     if isinstance(ts.iloc[0], pd.Timestamp):
-        ts = ts.view('int64')
+        ts = ts.astype('int64')
     else:
         h = np.nanmax(ts.values)
         if h < 1e7:
@@ -2872,6 +2875,8 @@ def _x2t(datasrc, x, ts2str):
             if not datasrc.timebased():
                 return '%g' % t, False
             s = ts2str(t)
+            if not truncate_timestamp:
+                return s,True
             if epoch_period >= 23*60*60: # daylight savings, leap seconds, etc
                 i = s.index(' ')
             elif epoch_period >= 59: # consider leap seconds
